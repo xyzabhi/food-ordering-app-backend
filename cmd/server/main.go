@@ -29,7 +29,7 @@ func main() {
 	}
 	defer rdb.Close()
 
-	r := router.SetUp(pool, rdb)
+	r := router.SetUp(pool, rdb, cfg.CORSAllowedOrigins)
 
 	log.Printf("Server is listening on %s", cfg.HTTPAddr)
 	if err := r.Run(cfg.HTTPAddr); err != nil {

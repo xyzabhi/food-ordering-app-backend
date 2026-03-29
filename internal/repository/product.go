@@ -2,13 +2,18 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/model"
 )
 
+var ErrProductNotFound = errors.New("product not found")
+
 type ProductRepository interface {
+	GetByID(ctx context.Context, id string) (model.Product, error)
 	GetByIDs(ctx context.Context, ids []string) (map[string]model.Product, error)
 	ListAll(ctx context.Context) ([]model.Product, error)
 }
@@ -19,6 +24,22 @@ type productRepository struct {
 
 func NewProductRepository(db *pgxpool.Pool) ProductRepository {
 	return &productRepository{db: db}
+}
+
+func (r *productRepository) GetByID(ctx context.Context, id string) (model.Product, error) {
+	var p model.Product
+	err := r.db.QueryRow(ctx, `
+SELECT id, name, price, category, image, created_at, updated_at
+FROM products
+WHERE id = $1
+`, id).Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Image, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Product{}, ErrProductNotFound
+		}
+		return model.Product{}, fmt.Errorf("get product: %w", err)
+	}
+	return p, nil
 }
 
 func (r *productRepository) GetByIDs(ctx context.Context, ids []string) (map[string]model.Product, error) {

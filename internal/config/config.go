@@ -2,12 +2,14 @@ package config
 
 import (
 	"os"
+	"strings"
 )
 
 type Config struct {
-	DatabaseURL string
-	RedisAddr   string
-	HTTPAddr    string // host:port for Listen, e.g. ":8080"
+	DatabaseURL        string
+	RedisAddr          string
+	HTTPAddr           string // host:port for Listen, e.g. ":8080"
+	CORSAllowedOrigins []string
 }
 
 func Load() Config {
@@ -25,9 +27,35 @@ func Load() Config {
 		port = "8080"
 	}
 	httpAddr := ":" + port
-	return Config{
-		DatabaseURL: dbURL,
-		RedisAddr:   redisAddr,
-		HTTPAddr:    httpAddr,
+
+	corsOrigins := parseCSVEnv("CORS_ALLOWED_ORIGINS")
+	if len(corsOrigins) == 0 {
+		corsOrigins = []string{
+			"http://localhost:3000",
+			"http://127.0.0.1:3000",
+		}
 	}
+
+	return Config{
+		DatabaseURL:        dbURL,
+		RedisAddr:          redisAddr,
+		HTTPAddr:           httpAddr,
+		CORSAllowedOrigins: corsOrigins,
+	}
+}
+
+func parseCSVEnv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

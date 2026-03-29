@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -35,4 +36,30 @@ func (h *ProductHandler) ListProducts(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"products": out})
+}
+
+func (h *ProductHandler) GetProductByID(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing product id"})
+		return
+	}
+
+	p, err := h.productRepo.GetByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.ProductResponse{
+		ID:       p.ID,
+		Name:     p.Name,
+		Price:    p.Price,
+		Category: p.Category,
+		Image:    p.Image,
+	})
 }

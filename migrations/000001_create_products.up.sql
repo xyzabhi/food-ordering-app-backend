@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS products (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	price DOUBLE PRECISION NOT NULL,
+	category TEXT NOT NULL,
+	image TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS products_category_idx ON products (category);

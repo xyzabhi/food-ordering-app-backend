@@ -11,11 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 )
-
-var promoCodeRe = regexp.MustCompile(`[A-Za-z0-9]{8,10}`)
 
 // LoadValidCoupons downloads and parses each gzip URL, then returns all promo codes
 // that can be found in at least two files.
@@ -44,25 +41,24 @@ func LoadValidCouponsWithCache(ctx context.Context, urls []string, cachePath str
 	startAll := time.Now()
 	log.Printf("coupons: building promo cache from %d source files", len(urls))
 
-	// code hash -> number of distinct files where it appears
-	foundInFiles := make(map[uint64]int)
+	// code hash -> bitmask of files where code appears
+	// bit i means it appeared in urls[i].
+	foundInFiles := make(map[uint64]uint8)
 
 	for i, url := range urls {
 		fileStart := time.Now()
 		log.Printf("coupons: [%d/%d] downloading+parsing %s", i+1, len(urls), url)
-		localCodes, err := loadUniqueCodesFromGzipURL(ctx, http.DefaultClient, url)
+		mask := uint8(1 << i)
+		uniqueForFile, err := loadUniqueCodesFromGzipURL(ctx, http.DefaultClient, url, mask, foundInFiles)
 		if err != nil {
 			return nil, fmt.Errorf("coupon base %d: %s: %w", i+1, url, err)
 		}
-		log.Printf("coupons: [%d/%d] parsed %d unique candidates in %s", i+1, len(urls), len(localCodes), time.Since(fileStart).Round(time.Millisecond))
-		for h := range localCodes {
-			foundInFiles[h]++
-		}
+		log.Printf("coupons: [%d/%d] parsed %d unique candidates in %s", i+1, len(urls), uniqueForFile, time.Since(fileStart).Round(time.Millisecond))
 	}
 
 	valid := make(map[uint64]struct{})
-	for h, n := range foundInFiles {
-		if n >= 2 {
+	for h, mask := range foundInFiles {
+		if bitsSet(mask) >= 2 {
 			valid[h] = struct{}{}
 		}
 	}
@@ -82,73 +78,111 @@ func LoadValidCouponsWithCache(ctx context.Context, urls []string, cachePath str
 	return store, nil
 }
 
-func loadUniqueCodesFromGzipURL(ctx context.Context, client *http.Client, url string) (map[uint64]struct{}, error) {
+func loadUniqueCodesFromGzipURL(ctx context.Context, client *http.Client, url string, fileMask uint8, foundInFiles map[uint64]uint8) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		return 0, fmt.Errorf("new request: %w", err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http get: %w", err)
+		return 0, fmt.Errorf("http get: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
+		return 0, fmt.Errorf("unexpected status: %s", resp.Status)
 	}
 
 	pr := newProgressReader(resp.Body, url, resp.ContentLength)
 	defer pr.LogFinal()
 
-	return loadUniqueCodesFromGzipStream(pr)
+	return loadUniqueCodesFromGzipStream(pr, fileMask, foundInFiles)
 }
 
-func loadUniqueCodesFromGzipStream(gzipStream io.Reader) (map[uint64]struct{}, error) {
+func loadUniqueCodesFromGzipStream(gzipStream io.Reader, fileMask uint8, foundInFiles map[uint64]uint8) (int, error) {
 	zr, err := gzip.NewReader(gzipStream)
 	if err != nil {
-		return nil, fmt.Errorf("gzip reader: %w", err)
+		return 0, fmt.Errorf("gzip reader: %w", err)
 	}
 	defer func() { _ = zr.Close() }()
 
-	// Local set for “appears in this file”.
-	local := make(map[uint64]struct{})
-
-	// We stream-read and apply a regex over a sliding tail, so codes can be detected even when
-	// they span arbitrary chunk boundaries.
-	const tailKeep = 32
-	const bufSize = 64 * 1024
-
 	r := bufio.NewReader(zr)
-	buf := make([]byte, bufSize)
-	tail := ""
+	buf := make([]byte, 64*1024)
+	token := make([]byte, 0, 10)
+	tooLong := false
+	uniqueForFile := 0
+
+	flush := func() {
+		if tooLong {
+			token = token[:0]
+			tooLong = false
+			return
+		}
+		if len(token) < 8 || len(token) > 10 {
+			token = token[:0]
+			return
+		}
+
+		// Normalize to uppercase without allocating new strings.
+		for i := 0; i < len(token); i++ {
+			if token[i] >= 'a' && token[i] <= 'z' {
+				token[i] = token[i] - 32
+			}
+		}
+		if h, ok := hashPromoCodeUpper(string(token)); ok {
+			old := foundInFiles[h]
+			if old&fileMask == 0 {
+				foundInFiles[h] = old | fileMask
+				uniqueForFile++
+			}
+		}
+		token = token[:0]
+	}
 
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			chunk := tail + string(buf[:n])
-			matches := promoCodeRe.FindAllString(chunk, -1)
-			for _, m := range matches {
-				if h, ok := hashPromoCodeUpper(m); ok {
-					local[h] = struct{}{}
+			for i := 0; i < n; i++ {
+				b := buf[i]
+				if isAlnum(b) {
+					if tooLong {
+						continue
+					}
+					if len(token) < 10 {
+						token = append(token, b)
+					} else {
+						tooLong = true
+						token = token[:0]
+					}
+					continue
 				}
-			}
-
-			if len(chunk) > tailKeep {
-				tail = chunk[len(chunk)-tailKeep:]
-			} else {
-				tail = chunk
+				flush()
 			}
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read stream: %w", err)
+			return 0, fmt.Errorf("read stream: %w", err)
 		}
 	}
+	flush()
 
-	return local, nil
+	return uniqueForFile, nil
+}
+
+func isAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+func bitsSet(v uint8) int {
+	n := 0
+	for v != 0 {
+		n += int(v & 1)
+		v >>= 1
+	}
+	return n
 }
 
 func loadStoreFromCache(cachePath string) (*InMemoryStore, bool, error) {

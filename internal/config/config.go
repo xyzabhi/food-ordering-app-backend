@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strings"
+	"strconv"
 )
 
 type Config struct {
@@ -10,6 +11,9 @@ type Config struct {
 	RedisAddr          string
 	HTTPAddr           string // host:port for Listen, e.g. ":8080"
 	CORSAllowedOrigins []string
+	CouponBaseURLs     []string
+	CouponDiscountPct  float64
+	CouponCachePath    string
 }
 
 func Load() Config {
@@ -36,11 +40,36 @@ func Load() Config {
 		}
 	}
 
+	couponURLs := parseCSVEnv("COUPON_BASE_URLS")
+	if len(couponURLs) == 0 {
+		// These are the three .gz files you provided.
+		couponURLs = []string{
+			"https://orderfoodonline-files.s3.ap-southeast-2.amazonaws.com/couponbase1.gz",
+			"https://orderfoodonline-files.s3.ap-southeast-2.amazonaws.com/couponbase2.gz",
+			"https://orderfoodonline-files.s3.ap-southeast-2.amazonaws.com/couponbase3.gz",
+		}
+	}
+
+	discountPct := 15.0
+	if raw := strings.TrimSpace(os.Getenv("COUPON_DISCOUNT_PCT")); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			discountPct = v
+		}
+	}
+
+	cachePath := os.Getenv("COUPON_CACHE_PATH")
+	if cachePath == "" {
+		cachePath = "./data/coupon_cache.bin"
+	}
+
 	return Config{
 		DatabaseURL:        dbURL,
 		RedisAddr:          redisAddr,
 		HTTPAddr:           httpAddr,
 		CORSAllowedOrigins: corsOrigins,
+		CouponBaseURLs:     couponURLs,
+		CouponDiscountPct:  discountPct,
+		CouponCachePath:    cachePath,
 	}
 }
 

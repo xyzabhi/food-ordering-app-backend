@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/xyzabhi/food-ordering-app-backend/internal/coupons"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/dto"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/repository"
 )
@@ -17,21 +18,19 @@ var (
 	ErrInvalidCoupon  = errors.New("invalid coupon code")
 )
 
-// couponCode -> discount percent (0–100) on subtotal after line totals
-var couponPercentOff = map[string]float64{
-	"SAVE10": 10,
-	"SAVE20": 20,
-}
-
 type OrderService struct {
 	orderRepository   repository.OrderRepository
 	productRepository repository.ProductRepository
+	couponStore       coupons.Store
+	couponDiscountPct float64
 }
 
-func NewOrderService(orderRepo repository.OrderRepository, productRepo repository.ProductRepository) *OrderService {
+func NewOrderService(orderRepo repository.OrderRepository, productRepo repository.ProductRepository, couponStore coupons.Store, couponDiscountPct float64) *OrderService {
 	return &OrderService{
 		orderRepository:   orderRepo,
 		productRepository: productRepo,
+		couponStore:       couponStore,
+		couponDiscountPct: couponDiscountPct,
 	}
 }
 
@@ -86,11 +85,10 @@ func (s *OrderService) CreateOrder(ctx context.Context, req dto.OrderRequest) (d
 	coupon := strings.TrimSpace(req.CouponCode)
 	var discount float64
 	if coupon != "" {
-		pct, ok := couponPercentOff[strings.ToUpper(coupon)]
-		if !ok {
+		if s.couponStore == nil || !s.couponStore.IsValid(coupon) {
 			return dto.OrderResponse{}, ErrInvalidCoupon
 		}
-		discount = total * (pct / 100)
+		discount = total * (s.couponDiscountPct / 100)
 	}
 
 	final := total - discount

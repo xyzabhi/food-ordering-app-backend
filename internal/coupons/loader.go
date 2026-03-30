@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"path/filepath"
+	"regexp"
+	"time"
 )
 
 var promoCodeRe = regexp.MustCompile(`[A-Za-z0-9]{8,10}`)
@@ -34,18 +36,25 @@ func LoadValidCouponsWithCache(ctx context.Context, urls []string, cachePath str
 		if store, ok, err := loadStoreFromCache(cachePath); err != nil {
 			return nil, fmt.Errorf("load coupon cache: %w", err)
 		} else if ok {
+			log.Printf("coupons: loaded %d valid promo hashes from cache: %s", len(store.valid), cachePath)
 			return store, nil
 		}
 	}
+
+	startAll := time.Now()
+	log.Printf("coupons: building promo cache from %d source files", len(urls))
 
 	// code hash -> number of distinct files where it appears
 	foundInFiles := make(map[uint64]int)
 
 	for i, url := range urls {
+		fileStart := time.Now()
+		log.Printf("coupons: [%d/%d] downloading+parsing %s", i+1, len(urls), url)
 		localCodes, err := loadUniqueCodesFromGzipURL(ctx, http.DefaultClient, url)
 		if err != nil {
 			return nil, fmt.Errorf("coupon base %d: %s: %w", i+1, url, err)
 		}
+		log.Printf("coupons: [%d/%d] parsed %d unique candidates in %s", i+1, len(urls), len(localCodes), time.Since(fileStart).Round(time.Millisecond))
 		for h := range localCodes {
 			foundInFiles[h]++
 		}
@@ -66,8 +75,10 @@ func LoadValidCouponsWithCache(ctx context.Context, urls []string, cachePath str
 		if err := saveStoreToCache(cachePath, store); err != nil {
 			return nil, fmt.Errorf("save coupon cache: %w", err)
 		}
+		log.Printf("coupons: saved cache with %d valid promo hashes to %s", len(store.valid), cachePath)
 	}
 
+	log.Printf("coupons: build complete in %s (valid promo hashes: %d)", time.Since(startAll).Round(time.Millisecond), len(store.valid))
 	return store, nil
 }
 
@@ -87,7 +98,10 @@ func loadUniqueCodesFromGzipURL(ctx context.Context, client *http.Client, url st
 		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
 	}
 
-	return loadUniqueCodesFromGzipStream(resp.Body)
+	pr := newProgressReader(resp.Body, url, resp.ContentLength)
+	defer pr.LogFinal()
+
+	return loadUniqueCodesFromGzipStream(pr)
 }
 
 func loadUniqueCodesFromGzipStream(gzipStream io.Reader) (map[uint64]struct{}, error) {
@@ -223,5 +237,52 @@ func saveStoreToCache(cachePath string, store *InMemoryStore) error {
 		return err
 	}
 	return os.Rename(tmpPath, cachePath)
+}
+
+type progressReader struct {
+	r            io.Reader
+	label        string
+	total        int64
+	read         int64
+	nextLogBytes int64
+}
+
+func newProgressReader(r io.Reader, label string, total int64) *progressReader {
+	const logEvery = 25 * 1024 * 1024 // 25MB
+	return &progressReader{
+		r:            r,
+		label:        label,
+		total:        total,
+		nextLogBytes: logEvery,
+	}
+}
+
+func (p *progressReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	if n > 0 {
+		p.read += int64(n)
+		for p.read >= p.nextLogBytes {
+			p.logProgress()
+			p.nextLogBytes += 25 * 1024 * 1024
+		}
+	}
+	return n, err
+}
+
+func (p *progressReader) logProgress() {
+	if p.total > 0 {
+		percent := (float64(p.read) / float64(p.total)) * 100
+		log.Printf("coupons: downloading %s %.1f%% (%d/%d MB)", p.label, percent, p.read/(1024*1024), p.total/(1024*1024))
+		return
+	}
+	log.Printf("coupons: downloading %s (%d MB read)", p.label, p.read/(1024*1024))
+}
+
+func (p *progressReader) LogFinal() {
+	if p.total > 0 {
+		log.Printf("coupons: finished download %s (%d/%d MB)", p.label, p.read/(1024*1024), p.total/(1024*1024))
+		return
+	}
+	log.Printf("coupons: finished download %s (%d MB read)", p.label, p.read/(1024*1024))
 }
 

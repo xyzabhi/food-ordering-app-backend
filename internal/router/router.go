@@ -7,12 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/xyzabhi/food-ordering-app-backend/internal/coupons"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/handler"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/repository"
 	"github.com/xyzabhi/food-ordering-app-backend/internal/service"
 )
 
-func SetUp(db *pgxpool.Pool, rdb *redis.Client, corsAllowedOrigins []string) *gin.Engine {
+func SetUp(db *pgxpool.Pool, rdb *redis.Client, corsAllowedOrigins []string, couponStore coupons.Store, couponDiscountPct float64) *gin.Engine {
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     corsAllowedOrigins,
@@ -32,9 +33,12 @@ func SetUp(db *pgxpool.Pool, rdb *redis.Client, corsAllowedOrigins []string) *gi
 	r.GET("/products/:id", productHandler.GetProductByID)
 
 	orderRepo := repository.NewOrderRepository(db)
-	orderSvc := service.NewOrderService(orderRepo, productRepo)
+	orderSvc := service.NewOrderService(orderRepo, productRepo, couponStore, couponDiscountPct)
 	orderHandler := handler.NewOrderHandler(orderSvc)
 	r.POST("/orders", orderHandler.CreateOrder)
+
+	promoHandler := handler.NewPromoHandler(couponStore, couponDiscountPct)
+	r.GET("/checkpromo", promoHandler.CheckPromo)
 
 	return r
 }
